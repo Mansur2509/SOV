@@ -2,13 +2,14 @@
 # ║           НАСТРОЙКИ БОТА SOV                     ║
 # ╚══════════════════════════════════════════════════╝
 
-BOT_TOKEN = "СЮДА_ВСТАВЬ_НОВЫЙ_ТОКЕН"   # ← получи новый у @BotFather после /revoke
+BOT_TOKEN = "8775799563:AAF7SRkNiUGX6v47eqf9sAXOQk9g_BHUVvs"   # ← получи новый у @BotFather после /revoke
 
 ADMIN_IDS = [
     1812843698  # Mansur ID
 ]
 
-SUPPORT_USERNAME = "@Otvet_mne_uje_nakonec"
+SUPPORT_USERNAME = "@Otvet_mne_uje_nakonec : Хэд SOV, готов помочь с любыми вопросами по волонтерству!\n\n @SOV_administration : Официальный аккаунт для важных объявлений и новостей от администрации SOV."
+            
 
 REGLAMENT = """
 <b>🏛 РЕГЛАМЕНТ ВОЛОНТЕРСКОГО КОРПУСА SOV</b>
