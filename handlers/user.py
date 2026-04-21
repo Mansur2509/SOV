@@ -72,7 +72,6 @@ def main_menu_localized(tg_id: int):
     builder.row(KeyboardButton(text=t("btn_lang", l)),    KeyboardButton(text=t("btn_home", l)))
     return builder.as_markup(resize_keyboard=True)
 
-
 async def push_new_announcements(tg_id: int, bot):
     new_anns = get_new_announcements_for_user(tg_id)
     if not new_anns:
@@ -82,15 +81,15 @@ async def push_new_announcements(tg_id: int, bot):
     for ann in new_anns:
         try:
             dt = datetime.fromisoformat(ann["created_at"]).strftime("%d.%m.%Y")
+            ann_header = 'Новое объявление SOV' if l == 'ru' else 'Yangi elon SOV' if l == 'uz' else 'New SOV announcement'
             await bot.send_message(
                 tg_id,
-                f"📢 <b>{'Новое объявление SOV' if l=='ru' else "Yangi e\'lon SOV' if l=='uz' else 'New SOV announcement"}</b> ({dt})\n\n{ann['text']}",
-                parse_mode="HTML"
+                '📢 <b>' + ann_header + '</b> (' + dt + ')\n\n' + ann['text'],
+                parse_mode='HTML'
             )
         except Exception:
             pass
     update_last_seen_ann(tg_id, new_anns[-1]["id"])
-
 
 def lang_select_kb():
     builder = InlineKeyboardBuilder()
