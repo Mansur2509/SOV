@@ -539,7 +539,8 @@ async def event_detail(call: CallbackQuery):
 
     if already:
         status_icons = {"selected": "✅", "pending": "⏳", "rejected": "❌"}
-        text += f"\n\n{status_icons.get(app_status,'❓')} <i>{'Ты записан' if l=='ru' else "Ro\\'yxatdan o\\'tdingiz' if l=='uz' else 'You are registered"}</i>"
+        reg_status = 'Ты записан' if l == 'ru' else 'Royxatdan otdingiz' if l == 'uz' else 'You are registered'
+        text += f"\n\n{status_icons.get(app_status, '❓')} <i>{reg_status}</i>"
 
     kb = event_detail_kb(event_id, already, can_apply, app_status, l)
 
