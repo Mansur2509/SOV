@@ -6,14 +6,14 @@
 TEXTS = {
     # ── Регистрация ──────────────────────────────────────────────────────────
     "welcome_new": {
-        "ru": "👋 Добро пожаловать в бот <b>SOV — School of Volunteers, Alwuit!</b>\n\nДавай создадим твой аккаунт.\n\n✏️ Введи своё <b>полное ФИО</b>:",
+        "ru": "👋 Добро пожаловать в бот <b>SOV — School of Volunteers, Alwuit!</b>\n\nДавай создадим твой аккаунт.\n\n✏️ Введи своё <b>полное ФИО</b> на латинице:",
         "uz": "👋 <b>SOV — School of Volunteers, Alwuit</b> botiga xush kelibsiz!\n\nKeling, hisobingizni yarataylik.\n\n✏️ <b>To'liq ismingizni</b> kiriting (F.I.Sh.):",
         "en": "👋 Welcome to the <b>SOV — School of Volunteers, Alwuit</b> bot!\n\nLet's create your account.\n\n✏️ Enter your <b>full name</b>:",
     },
     "ask_group": {
-        "ru": "📚 Введи свою <b>группу</b> (например: CS-101):",
-        "uz": "📚 <b>Guruhingizni</b> kiriting (masalan: CS-101):",
-        "en": "📚 Enter your <b>group</b> (e.g. CS-101):",
+        "ru": "📚 Введи свою <b>группу</b> (например: 1rug7):",
+        "uz": "📚 <b>Guruhingizni</b> kiriting (masalan: 1rug7):",
+        "en": "📚 Enter your <b>group</b> (e.g. 1rug7):",
     },
     "ask_gender": {
         "ru": "👤 Выбери <b>пол</b>:",
@@ -169,6 +169,7 @@ TEXTS = {
             "Когда организаторы создают новый ивент — он появляется в «📋 Активные ивенты». "
             "Нажми «✋ Записаться» чтобы подать заявку.\n\n"
             "<b>3. Отбор</b>\n"
+            "Есть два типа отбора: ручной и автоматический. При ручном организатор сам (в большенстве случаев так). Но иногда исользуется алгоритм выбора\n\n"
             "Организатор запускает автоподбор. Система выбирает волонтёров по рейтингу и опыту. "
             "Если тебя выбрали — придёт уведомление.\n\n"
             "<b>4. Напоминания</b>\n"
@@ -194,6 +195,7 @@ TEXTS = {
             "Yangi tadbir yaratilganda u «📋 Faol tadbirlar» bo'limida paydo bo'ladi. "
             "Ariza berish uchun «✋ Ro'yxatdan o'tish» tugmasini bosing.\n\n"
             "<b>3. Tanlov</b>\n"
+            "Saralashning ikki turi mavjud: qo'lda (manual) va avtomatik. Qo'lda saralashda tashkilotchi ishtirokchilarni o'zi tanlaydi (ko'p hollarda shunday bo'ladi). Ammo ba'zida tanlov algoritmidan ham foydalaniladi.\n\n"
             "Tashkilotchi avtomatik tanlovni ishga tushiradi. Tizim reyting va tajribaga qarab tanlaydi. "
             "Siz tanlansangiz — xabarnoma keladi.\n\n"
             "<b>4. Eslatmalar</b>\n"
@@ -216,6 +218,7 @@ TEXTS = {
             "When organizers create a new event, it appears in «📋 Active events». "
             "Press «✋ Sign up» to apply.\n\n"
             "<b>3. Selection</b>\n"
+            "There are two types of selection: manual and automatic. In manual selection, the organizer chooses the participants personally (this is the case in most instances). However, sometimes a selection algorithm is used instead.\n\n"    
             "The organizer runs auto-selection. The system picks volunteers by rating and experience. "
             "If selected — you'll get a notification.\n\n"
             "<b>4. Reminders</b>\n"
