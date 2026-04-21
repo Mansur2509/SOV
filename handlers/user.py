@@ -84,7 +84,7 @@ async def push_new_announcements(tg_id: int, bot):
             dt = datetime.fromisoformat(ann["created_at"]).strftime("%d.%m.%Y")
             await bot.send_message(
                 tg_id,
-                f"📢 <b>{'Новое объявление SOV' if l=='ru' else "Yangi e'lon SOV' if l=='uz' else 'New SOV announcement"}</b> ({dt})\n\n{ann['text']}",
+                f"📢 <b>{'Новое объявление SOV' if l=='ru' else 'Yangi e\'lon SOV' if l=='uz' else 'New SOV announcement'}</b> ({dt})\n\n{ann['text']}",
                 parse_mode="HTML"
             )
         except Exception:
