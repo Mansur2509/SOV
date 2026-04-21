@@ -1351,9 +1351,9 @@ async def manage_roles(message: Message):
     await message.answer(
         "🎭 <b>Управление ролями</b>\n\n"
         "<b>Организаторы:</b>\n" + "\n".join(lines) + "\n\n"
-        "Команды:\n"
-        "/setrole <tg_id> organizer\n"
-        "/setrole <tg_id> user",
+        "<b>Команды:</b>\n"
+        "<code>/setrole ID organizer</code>\n"
+        "<code>/setrole ID user</code>",
         parse_mode="HTML"
     )
 
