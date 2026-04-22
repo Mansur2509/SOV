@@ -433,6 +433,16 @@ def update_user_notes(tg_id: int, notes: str):
     conn.commit(); conn.close()
 
 
+def update_user_profile(tg_id: int, field: str, value: str):
+    """Обновляет поле профиля. field: full_name | group_name | gender"""
+    allowed = {"full_name", "group_name", "gender"}
+    if field not in allowed:
+        raise ValueError(f"Недопустимое поле: {field}")
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q(f"UPDATE users SET {field}=? WHERE tg_id=?"), (value, tg_id))
+    conn.commit(); conn.close()
+
+
 def set_user_photo(tg_id: int, file_id: str):
     conn = get_conn(); c = conn.cursor()
     c.execute(_q("UPDATE users SET photo_file_id=? WHERE tg_id=?"), (file_id, tg_id))

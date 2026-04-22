@@ -1,16 +1,18 @@
 services:
-  - type: worker
+  - type: web
     name: sov-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
       - key: BOT_TOKEN
-        sync: false          # вводишь вручную в Render Dashboard
+        sync: false
       - key: DATABASE_URL
-        sync: false          # строка подключения Supabase
+        sync: false
       - key: WEBHOOK_HOST
-        sync: false          # например: https://sov-bot.onrender.com
+        sync: false
       - key: PORT
         value: "8080"
+      - key: ADMIN_IDS
+        sync: false
     autoDeploy: true

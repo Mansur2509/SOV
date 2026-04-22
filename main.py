@@ -14,25 +14,16 @@ from handlers.organizer import router as organizer_router
 from scheduler import monthly_scheduler, reminder_scheduler, deadline_scheduler
 from utils.cache import cleanup_loop
 from utils.audit import init_audit_table
-from utils.achievements import _save_achievements  # noqa — triggers table creation on import
+from utils.achievements import _save_achievements  # noqa
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s — %(message)s",
     datefmt="%H:%M:%S"
 )
-
-# Отдельный тихий логгер для audit
-audit_log = logging.getLogger("sov.audit")
-audit_handler = logging.FileHandler("audit.log", encoding="utf-8")
-audit_handler.setFormatter(logging.Formatter("%(message)s"))
-audit_log.addHandler(audit_handler)
-audit_log.setLevel(logging.INFO)
-
 logger = logging.getLogger(__name__)
 
-# ── Конфигурация webhook ──────────────────────────────────────────────────────
-WEBHOOK_HOST = os.environ.get("WEBHOOK_HOST", "")   # например https://sov-bot.onrender.com
+WEBHOOK_HOST = os.environ.get("WEBHOOK_HOST", "")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL  = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else ""
 WEB_PORT     = int(os.environ.get("PORT", 8080))
@@ -42,7 +33,6 @@ async def on_startup(bot: Bot):
     init_db()
     logger.info("База данных инициализирована ✓")
 
-    # Дополнительные таблицы
     try:
         init_audit_table()
         from database import init_roles_table, init_templates_table
@@ -52,7 +42,6 @@ async def on_startup(bot: Bot):
     except Exception as e:
         logger.warning(f"Таблицы (не критично): {e}")
 
-    # Webhook или polling — определяем по наличию WEBHOOK_HOST
     if WEBHOOK_URL:
         await bot.set_webhook(WEBHOOK_URL)
         logger.info(f"Webhook установлен: {WEBHOOK_URL} ✓")
@@ -67,6 +56,21 @@ async def on_shutdown(bot: Bot):
     logger.info("Бот остановлен.")
 
 
+async def keepalive_loop():
+    """Пингует /health каждые 10 минут — не даёт Render усыпить процесс."""
+    import aiohttp
+    await asyncio.sleep(90)  # дать время поднять сервер
+    while True:
+        try:
+            url = f"http://0.0.0.0:{WEB_PORT}/health"
+            async with aiohttp.ClientSession() as s:
+                await s.get(url, timeout=aiohttp.ClientTimeout(total=10))
+            logger.debug("keepalive ✓")
+        except Exception:
+            pass
+        await asyncio.sleep(600)
+
+
 async def main():
     bot = Bot(token=BOT_TOKEN)
     dp  = Dispatcher(storage=MemoryStorage())
@@ -74,23 +78,28 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
-    # Роутеры — порядок важен (более специфичные раньше)
     dp.include_router(admin.router)
     dp.include_router(organizer_router)
     dp.include_router(user.router)
 
-    # Фоновые задачи
     async def background(bot: Bot):
         await asyncio.gather(
             monthly_scheduler(bot),
             reminder_scheduler(bot),
             deadline_scheduler(bot),
             cleanup_loop(),
+            keepalive_loop(),
         )
 
     if WEBHOOK_URL:
-        # ── Webhook режим (Render) ──────────────────────────────────────────
         app = web.Application()
+
+        async def health(_req):
+            return web.Response(text="OK")
+
+        app.router.add_get("/health", health)
+        app.router.add_get("/", health)
+
         handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         handler.register(app, path=WEBHOOK_PATH)
         setup_application(app, dp, bot=bot)
@@ -104,11 +113,9 @@ async def main():
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
         await site.start()
-        # Держим сервер живым
         await asyncio.Event().wait()
 
     else:
-        # ── Polling режим (локальная разработка) ───────────────────────────
         logger.info("🚀 Запуск в режиме polling (локально)")
         asyncio.create_task(background(bot))
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

@@ -15,7 +15,7 @@ from database import (
     get_user_events, get_top_users, get_announcements, get_announcements_count,
     get_new_announcements_for_user, update_last_seen_ann,
     create_proposal, check_rate_limit,
-    get_user_cards, set_user_photo,
+    get_user_cards, set_user_photo, update_user_profile,
     get_event_by_qr_token, confirm_attendance,
     recalc_streak
 )
@@ -50,6 +50,11 @@ class ProposalState(StatesGroup):
 
 class PhotoState(StatesGroup):
     waiting = State()
+
+
+class EditProfileState(StatesGroup):
+    field    = State()   # какое поле редактируем
+    new_val  = State()   # новое значение
 
 
 # ─── Хелперы ─────────────────────────────────────────────────────────────────
@@ -326,6 +331,10 @@ async def my_profile(message: Message):
         text={"ru": "📅 Мой календарь", "uz": "📅 Mening taqvimim", "en": "📅 My calendar"}.get(l, "📅 Мой календарь"),
         callback_data="show_calendar"
     ))
+    builder.row(InlineKeyboardButton(
+        text={"ru": "✏️ Редактировать профиль", "uz": "✏️ Profilni tahrirlash", "en": "✏️ Edit profile"}.get(l, "✏️ Редактировать профиль"),
+        callback_data="edit_profile_menu"
+    ))
     kb = builder.as_markup()
 
     if user.get("photo_file_id"):
@@ -351,6 +360,116 @@ async def save_photo(message: Message, state: FSMContext):
     l   = lang(message.from_user.id)
     txt = {"ru": "✅ Фото профиля обновлено!", "uz": "✅ Profil rasmi yangilandi!", "en": "✅ Profile photo updated!"}
     await message.answer(txt.get(l, txt["ru"]))
+
+
+# ─── Редактирование профиля ──────────────────────────────────────────────────
+
+@router.callback_query(F.data == "edit_profile_menu")
+async def edit_profile_menu(call: CallbackQuery):
+    l = lang(call.from_user.id)
+    labels = {
+        "ru": ("✏️ <b>Редактирование профиля</b>\n\nЧто хочешь изменить?",
+               "👤 Изменить ФИО", "📚 Изменить группу", "🚻 Изменить пол", "◀️ Назад"),
+        "uz": ("✏️ <b>Profilni tahrirlash</b>\n\nNimani o\'zgartirmoqchisiz?",
+               "👤 F.I.Sh. o\'zgartirish", "📚 Guruhni o\'zgartirish", "🚻 Jinsni o\'zgartirish", "◀️ Orqaga"),
+        "en": ("✏️ <b>Edit profile</b>\n\nWhat do you want to change?",
+               "👤 Change name", "📚 Change group", "🚻 Change gender", "◀️ Back"),
+    }
+    txt, btn_name, btn_group, btn_gender, btn_back = labels.get(l, labels["ru"])
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=btn_name,   callback_data="edit_field_full_name"))
+    builder.row(InlineKeyboardButton(text=btn_group,  callback_data="edit_field_group_name"))
+    builder.row(InlineKeyboardButton(text=btn_gender, callback_data="edit_field_gender"))
+    builder.row(InlineKeyboardButton(text=btn_back,   callback_data="close_edit_profile"))
+    try:
+        await call.message.edit_text(txt, parse_mode="HTML", reply_markup=builder.as_markup())
+    except Exception:
+        await call.message.answer(txt, parse_mode="HTML", reply_markup=builder.as_markup())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("edit_field_"))
+async def edit_field_start(call: CallbackQuery, state: FSMContext):
+    field = call.data.replace("edit_field_", "")   # full_name | group_name | gender
+    l = lang(call.from_user.id)
+    await state.update_data(edit_field=field)
+
+    if field == "gender":
+        # Для пола — inline кнопки, не текстовый ввод
+        labels = {
+            "ru": ("🚻 Выбери новый пол:", "♂ Мужской", "♀ Женский"),
+            "uz": ("🚻 Yangi jinsni tanlang:", "♂ Erkak", "♀ Ayol"),
+            "en": ("🚻 Choose new gender:", "♂ Male", "♀ Female"),
+        }
+        txt, male, female = labels.get(l, labels["ru"])
+        builder = InlineKeyboardBuilder()
+        builder.row(
+            InlineKeyboardButton(text=male,   callback_data="edit_gender_М"),
+            InlineKeyboardButton(text=female, callback_data="edit_gender_Ж"),
+        )
+        await call.message.answer(txt, reply_markup=builder.as_markup())
+    else:
+        prompts = {
+            "full_name":  {"ru": "✏️ Введи новое ФИО (на латинице):", "uz": "✏️ Yangi F.I.Sh. kiriting:", "en": "✏️ Enter new full name:"},
+            "group_name": {"ru": "✏️ Введи новую группу (например: 1rug7):", "uz": "✏️ Yangi guruhni kiriting:", "en": "✏️ Enter new group:"},
+        }
+        txt = prompts.get(field, {}).get(l, "✏️ Введи новое значение:")
+        await state.set_state(EditProfileState.new_val)
+        await call.message.answer(txt)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("edit_gender_"))
+async def edit_gender_save(call: CallbackQuery):
+    gender = call.data.replace("edit_gender_", "")   # М или Ж
+    tg_id  = call.from_user.id
+    l      = lang(tg_id)
+    update_user_profile(tg_id, "gender", gender)
+    ok = {"ru": f"✅ Пол изменён на: {gender}", "uz": f"✅ Jins o\'zgartirildi: {gender}", "en": f"✅ Gender updated: {gender}"}
+    try:
+        await call.message.edit_text(ok.get(l, ok["ru"]))
+    except Exception:
+        await call.message.answer(ok.get(l, ok["ru"]))
+    await call.answer()
+
+
+@router.message(EditProfileState.new_val)
+async def edit_field_save(message: Message, state: FSMContext):
+    data  = await state.get_data()
+    field = data.get("edit_field")
+    value = message.text.strip()
+    tg_id = message.from_user.id
+    l     = lang(tg_id)
+
+    # Валидация
+    if field == "full_name":
+        if len(value) < 5 or len(value) > 100:
+            err = {"ru": "⚠️ ФИО должно быть от 5 до 100 символов.", "uz": "⚠️ F.I.Sh. 5-100 belgi bo\'lishi kerak.", "en": "⚠️ Name must be 5–100 characters."}
+            await message.answer(err.get(l, err["ru"])); return
+    elif field == "group_name":
+        if len(value) < 2 or len(value) > 20:
+            err = {"ru": "⚠️ Группа должна быть от 2 до 20 символов.", "uz": "⚠️ Guruh 2-20 belgi bo\'lishi kerak.", "en": "⚠️ Group must be 2–20 characters."}
+            await message.answer(err.get(l, err["ru"])); return
+
+    update_user_profile(tg_id, field, value)
+    await state.clear()
+
+    field_names = {
+        "full_name":  {"ru": "ФИО",    "uz": "F.I.Sh.", "en": "Name"},
+        "group_name": {"ru": "Группа", "uz": "Guruh",   "en": "Group"},
+    }
+    fname = field_names.get(field, {}).get(l, field)
+    ok = {"ru": f"✅ {fname} обновлено: <b>{value}</b>", "uz": f"✅ {fname} yangilandi: <b>{value}</b>", "en": f"✅ {fname} updated: <b>{value}</b>"}
+    await message.answer(ok.get(l, ok["ru"]), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "close_edit_profile")
+async def close_edit_profile(call: CallbackQuery):
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await call.answer()
 
 
 # ─── Рейтинг ─────────────────────────────────────────────────────────────────
