@@ -1175,3 +1175,266 @@ def get_all_groups() -> list:
     c.execute("SELECT DISTINCT group_name FROM users ORDER BY group_name")
     rows = c.fetchall(); conn.close()
     return [r[0] for r in rows]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# НОВЫЕ ФУНКЦИИ v5.0
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_migrations():
+    """Добавляет новые колонки в существующие таблицы."""
+    conn = get_conn(); c = conn.cursor()
+    cols = [
+        ("events", "card_photo_file_id", "TEXT DEFAULT NULL"),
+        ("events", "use_qr",             "INTEGER DEFAULT 0"),
+        ("events", "work_closed",        "INTEGER DEFAULT 0"),
+        ("events", "channel_post_id",    "TEXT DEFAULT NULL"),
+    ]
+    for table, col, definition in cols:
+        try:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+            conn.commit()
+        except Exception:
+            pass
+    # Расширяем допустимые статусы заявок
+    conn.close()
+
+
+def get_users_page(page: int = 0, per_page: int = 30):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    total = c.fetchone()[0]
+    c.execute(_q("SELECT * FROM users ORDER BY rating DESC, experience DESC LIMIT ? OFFSET ?"),
+              (per_page, page * per_page))
+    rows = _rows(c); conn.close()
+    return rows, total
+
+
+def delete_announcement(ann_id: int):
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q("DELETE FROM announcements WHERE id=?"), (ann_id,))
+    conn.commit(); conn.close()
+
+
+def get_announcement(ann_id: int):
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q("SELECT * FROM announcements WHERE id=?"), (ann_id,))
+    row = _row(c); conn.close()
+    return row
+
+
+def get_channel_id() -> str:
+    import os
+    return os.environ.get("CHANNEL_ID", "")
+
+
+def set_event_card_photo(event_id: int, file_id: str):
+    conn = get_conn(); c = conn.cursor()
+    try:
+        c.execute(f"ALTER TABLE events ADD COLUMN card_photo_file_id TEXT DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass
+    c.execute(_q("UPDATE events SET card_photo_file_id=? WHERE id=?"), (file_id, event_id))
+    conn.commit(); conn.close()
+
+
+def get_selected_users_detail(event_id: int):
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q("""
+        SELECT u.tg_id, u.full_name, u.group_name, u.gender, u.rating, u.experience,
+               a.status, a.attended
+        FROM applications a JOIN users u ON a.tg_id=u.tg_id
+        WHERE a.event_id=? AND a.status='selected'
+        ORDER BY u.rating DESC, u.experience DESC
+    """), (event_id,))
+    rows = _rows(c); conn.close()
+    return rows
+
+
+def set_application_status(event_id: int, tg_id: int, status: str):
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q("UPDATE applications SET status=? WHERE event_id=? AND tg_id=?"),
+              (status, event_id, tg_id))
+    conn.commit(); conn.close()
+
+
+def generate_qr_token(event_id: int, qr_type: str = "start") -> str:
+    import hashlib
+    raw   = f"sov_{qr_type}_{event_id}_{datetime.now().isoformat()}"
+    token = hashlib.sha256(raw.encode()).hexdigest()[:20]
+    conn  = get_conn(); c = conn.cursor()
+    try:
+        if BACKEND == "pg":
+            c.execute("CREATE TABLE IF NOT EXISTS qr_tokens (token TEXT PRIMARY KEY, event_id INTEGER, qr_type TEXT DEFAULT 'start', created_at TEXT)")
+        else:
+            c.execute("CREATE TABLE IF NOT EXISTS qr_tokens (token TEXT PRIMARY KEY, event_id INTEGER, qr_type TEXT DEFAULT 'start', created_at TEXT DEFAULT (datetime('now')))")
+        conn.commit()
+    except Exception:
+        pass
+    if BACKEND == "pg":
+        c.execute("INSERT INTO qr_tokens (token,event_id,qr_type) VALUES (%s,%s,%s) ON CONFLICT(token) DO UPDATE SET event_id=%s,qr_type=%s",
+                  (token, event_id, qr_type, event_id, qr_type))
+    else:
+        c.execute("INSERT OR REPLACE INTO qr_tokens (token,event_id,qr_type) VALUES (?,?,?)",
+                  (token, event_id, qr_type))
+    conn.commit(); conn.close()
+    return token
+
+
+def get_qr_token_info(token: str):
+    conn = get_conn(); c = conn.cursor()
+    try:
+        c.execute(_q("SELECT * FROM qr_tokens WHERE token=?"), (token,))
+        row = _row(c)
+    except Exception:
+        row = None
+    conn.close()
+    return row
+
+
+def confirm_attendance_start(event_id: int, tg_id: int) -> str:
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q("SELECT status, attended FROM applications WHERE event_id=? AND tg_id=?"),
+              (event_id, tg_id))
+    row = _row(c)
+    if not row: conn.close(); return "not_selected"
+    if row["status"] not in ("selected",): conn.close(); return "not_selected"
+    if row.get("attended", 0) >= 1: conn.close(); return "already"
+    # Расширяем допустимые значения status
+    try:
+        c.execute(_q("UPDATE applications SET attended=1, status='working' WHERE event_id=? AND tg_id=?"),
+                  (event_id, tg_id))
+    except Exception:
+        c.execute(_q("UPDATE applications SET attended=1 WHERE event_id=? AND tg_id=?"),
+                  (event_id, tg_id))
+    conn.commit(); conn.close()
+    return "ok"
+
+
+def confirm_attendance_end(event_id: int, tg_id: int) -> str:
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q("SELECT status FROM applications WHERE event_id=? AND tg_id=?"),
+              (event_id, tg_id))
+    row = _row(c)
+    if not row: conn.close(); return "not_working"
+    if row["status"] == "done": conn.close(); return "already_done"
+    try:
+        c.execute(_q("UPDATE applications SET status='done', attended=2 WHERE event_id=? AND tg_id=?"),
+                  (event_id, tg_id))
+    except Exception:
+        c.execute(_q("UPDATE applications SET attended=2 WHERE event_id=? AND tg_id=?"),
+                  (event_id, tg_id))
+    conn.commit(); conn.close()
+    return "ok"
+
+
+def close_event_work(event_id: int) -> list:
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q("""SELECT a.tg_id, u.full_name FROM applications a
+                    JOIN users u ON a.tg_id=u.tg_id
+                    WHERE a.event_id=? AND a.status IN ('selected','working')"""),
+              (event_id,))
+    violators = _rows(c)
+    for v in violators:
+        c.execute(_q("UPDATE users SET points=points+1 WHERE tg_id=?"), (v["tg_id"],))
+        c.execute(_q("INSERT INTO point_history (tg_id,delta,reason) VALUES (?,1,?)"),
+                  (v["tg_id"], f"Не завершил работу на ивенте #{event_id}"))
+        try:
+            c.execute(_q("UPDATE applications SET status='no_show' WHERE event_id=? AND tg_id=?"),
+                      (event_id, v["tg_id"]))
+        except Exception:
+            c.execute(_q("UPDATE applications SET status='rejected' WHERE event_id=? AND tg_id=?"),
+                      (event_id, v["tg_id"]))
+        c.execute(_q("SELECT points, ban_type FROM users WHERE tg_id=?"), (v["tg_id"],))
+        urow = _row(c)
+        if urow and urow["points"] >= 3:
+            if urow["ban_type"] == "temp":
+                c.execute(_q("UPDATE users SET ban_type='full',ban_until=NULL,points=0 WHERE tg_id=?"), (v["tg_id"],))
+            else:
+                bu = (datetime.now() + timedelta(days=30)).isoformat()
+                c.execute(_q("UPDATE users SET ban_type='temp',ban_until=?,points=0 WHERE tg_id=?"), (bu, v["tg_id"]))
+    conn.commit(); conn.close()
+    return violators
+
+
+def complete_event(event_id: int):
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q("UPDATE events SET is_active=0 WHERE id=?"), (event_id,))
+    conn.commit(); conn.close()
+
+
+def get_event_work_status(event_id: int) -> dict:
+    conn = get_conn(); c = conn.cursor()
+    c.execute(_q("SELECT status, COUNT(*) as cnt FROM applications WHERE event_id=? GROUP BY status"),
+              (event_id,))
+    rows = _rows(c); conn.close()
+    return {r["status"]: r["cnt"] for r in rows}
+
+
+def issue_cards_bulk(tg_ids: list, event_id: int) -> int:
+    count = 0
+    for tg_id in tg_ids:
+        if issue_card(tg_id, event_id):
+            count += 1
+    return count
+
+
+def adjust_rating(tg_id: int, delta: float, reason: str = ""):
+    conn = get_conn(); c = conn.cursor()
+    if BACKEND == "pg":
+        c.execute("UPDATE users SET rating=GREATEST(0, ROUND(CAST(rating+%s AS NUMERIC),2)) WHERE tg_id=%s",
+                  (delta, tg_id))
+    else:
+        c.execute("UPDATE users SET rating=MAX(0, ROUND(rating+?,2)) WHERE tg_id=?", (delta, tg_id))
+    if reason:
+        c.execute(_q("INSERT INTO point_history (tg_id,delta,reason) VALUES (?,?,?)"),
+                  (tg_id, int(delta * 10), f"[Рейтинг] {reason}"))
+    conn.commit(); conn.close()
+
+
+def bulk_ban(tg_ids: list, ban_type: str, days: int = 30):
+    conn = get_conn(); c = conn.cursor()
+    for tg_id in tg_ids:
+        if ban_type == "full":
+            c.execute(_q("UPDATE users SET ban_type='full',ban_until=NULL WHERE tg_id=?"), (tg_id,))
+        else:
+            bu = (datetime.now() + timedelta(days=days)).isoformat()
+            c.execute(_q("UPDATE users SET ban_type='temp',ban_until=? WHERE tg_id=?"), (bu, tg_id))
+    conn.commit(); conn.close()
+
+
+def bulk_unban(tg_ids: list):
+    conn = get_conn(); c = conn.cursor()
+    for tg_id in tg_ids:
+        c.execute(_q("UPDATE users SET ban_type='none',ban_until=NULL,points=0 WHERE tg_id=?"), (tg_id,))
+    conn.commit(); conn.close()
+
+
+def bulk_add_points(tg_ids: list, delta: int, reason: str = ""):
+    conn = get_conn(); c = conn.cursor()
+    for tg_id in tg_ids:
+        c.execute(_q("UPDATE users SET points=points+? WHERE tg_id=?"), (delta, tg_id))
+        c.execute(_q("INSERT INTO point_history (tg_id,delta,reason) VALUES (?,?,?)"),
+                  (tg_id, delta, reason))
+    conn.commit(); conn.close()
+
+
+def bulk_add_rating_score(tg_ids: list, event_id: int, score: float, comment: str = ""):
+    for tg_id in tg_ids:
+        try:
+            add_rating(event_id, tg_id, score, comment)
+        except Exception:
+            pass
+
+
+def bulk_select(event_id: int, tg_ids: list):
+    conn = get_conn(); c = conn.cursor()
+    for tg_id in tg_ids:
+        if BACKEND == "pg":
+            c.execute("INSERT INTO applications (event_id,tg_id,status) VALUES (%s,%s,'selected') ON CONFLICT(event_id,tg_id) DO UPDATE SET status='selected'",
+                      (event_id, tg_id))
+        else:
+            c.execute("INSERT OR REPLACE INTO applications (event_id,tg_id,status) VALUES (?,?,'selected')",
+                      (event_id, tg_id))
+    conn.commit(); conn.close()
