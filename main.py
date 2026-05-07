@@ -99,14 +99,10 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp  = Dispatcher(storage=MemoryStorage())
 
-<<<<<<< HEAD
+
     # Защита: rate limiting, SQL-инъекции, DDoS
     dp.message.middleware(SecurityMiddleware())
     dp.callback_query.middleware(SecurityMiddleware())
-
-=======
-    # Регистрация системных событий
->>>>>>> 78bcf1139d264f71964ccff3af2bfd76637955dd
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
