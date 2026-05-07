@@ -15,10 +15,11 @@ from database import (
     get_user_events, get_top_users, get_announcements, get_announcements_count,
     get_new_announcements_for_user, update_last_seen_ann,
     create_proposal, check_rate_limit,
-    get_user_cards, set_user_photo, update_user_profile,
-    get_event_by_qr_token, confirm_attendance,
-    recalc_streak
+    get_user_cards, set_user_photo,
+    get_qr_token_info, confirm_attendance_start, confirm_attendance_end,
+    recalc_streak, delete_announcement, get_announcements_count,
 )
+from security import normalize_group, normalize_name, check_rate
 from keyboards import (
     main_menu_kb, agreement_kb, gender_kb,
     events_kb, event_detail_kb, announcements_nav_kb, cards_nav_kb
@@ -170,7 +171,7 @@ async def reg_name(message: Message, state: FSMContext):
     l    = data.get("lang", "ru")
     if not check_rate_limit(message.from_user.id, "register", 10, 60):
         await message.answer("⚠️ Too many requests. Wait a minute."); return
-    name = message.text.strip()
+    name = normalize_name(message.text.strip())
     if len(name) < 5 or len(name) > 100:
         await message.answer("⚠️ 5–100 chars / символов / belgi"); return
     await state.update_data(full_name=name)
@@ -182,9 +183,9 @@ async def reg_name(message: Message, state: FSMContext):
 async def reg_group(message: Message, state: FSMContext):
     data = await state.get_data()
     l    = data.get("lang", "ru")
-    group = message.text.strip()
-    if len(group) < 2 or len(group) > 20:
-        await message.answer("⚠️ 2–20 chars"); return
+    group = normalize_group(message.text.strip())
+    if len(group) < 2:
+        await message.answer("⚠️ Введи корректную группу (напр: CS-101)"); return
     await state.update_data(group_name=group)
     await state.set_state(RegisterState.gender)
     builder = InlineKeyboardBuilder()
@@ -501,11 +502,13 @@ async def show_announcements(message: Message):
     anns = get_announcements(limit=1, offset=0)
     ann  = anns[0]
     from datetime import datetime
-    dt = datetime.fromisoformat(ann["created_at"]).strftime("%d.%m.%Y")
+    from config import ADMIN_IDS
+    dt       = datetime.fromisoformat(ann["created_at"]).strftime("%d.%m.%Y")
+    is_adm   = tg_id in ADMIN_IDS
     await message.answer(
         t("announcement_header", l, date=dt, idx=1, total=total) + ann["text"],
         parse_mode="HTML",
-        reply_markup=announcements_nav_kb(offset=0, total=total)
+        reply_markup=announcements_nav_kb(offset=0, total=total, is_admin=is_adm)
     )
     update_last_seen_ann(tg_id, ann["id"])
 
@@ -690,6 +693,12 @@ async def apply_event(call: CallbackQuery):
     if success:
         await call.answer(t("apply_success", l), show_alert=True)
         await event_detail(call)
+        # Уведомить канал при заполнении половины мест
+        try:
+            from handlers.admin import notify_slots_update
+            await notify_slots_update(call.bot, event_id)
+        except Exception:
+            pass
     else:
         msg = {"male_only": t("male_only", l), "female_only": t("female_only", l),
                "already": t("already_applied", l)}.get(reason, reason)
@@ -721,25 +730,92 @@ async def back_events(call: CallbackQuery):
 # ─── QR Сканирование ─────────────────────────────────────────────────────────
 
 @router.message(Command("qr"))
+@router.message(Command("start", magic=F.args.startswith("qr_")))
 async def qr_scan(message: Message):
-    """Использование: /qr <token>"""
+    """
+    Обработка QR-кодов двух типов:
+    - qr_start_TOKEN → волонтёр пришёл, статус: working
+    - qr_end_TOKEN   → волонтёр завершил, статус: done
+    Запускается через /start qr_start_TOKEN или /qr TOKEN
+    """
     tg_id = message.from_user.id
     l     = lang(tg_id)
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("Использование: /qr <token>"); return
-    token = parts[1].strip()
-    qr_row = get_event_by_qr_token(token)
-    if not qr_row:
-        await message.answer("❌ QR-код недействителен."); return
-    event    = get_event(qr_row["event_id"])
-    result   = confirm_attendance(qr_row["event_id"], tg_id)
-    if result == "ok":
-        await message.answer(t("qr_confirmed", l, event=event["title"]), parse_mode="HTML")
-    elif result == "already":
-        await message.answer(t("qr_already", l))
+
+    # Проверяем бан — при бане QR не работает
+    banned, ban_val = is_banned(tg_id)
+    if banned:
+        await message.answer(t("banned_full", l) if ban_val == "full" else t("banned_temp", l, date=ban_val))
+        return
+
+    # Извлекаем токен из /start qr_start_TOKEN или /qr TOKEN
+    text  = message.text or ""
+    parts = text.split()
+    token_raw = parts[1] if len(parts) > 1 else ""
+
+    # /start qr_start_TOKEN → token_raw = "qr_start_TOKEN"
+    if token_raw.startswith("qr_start_") or token_raw.startswith("qr_end_"):
+        segments = token_raw.split("_", 2)   # ["qr","start","TOKEN"] or ["qr","end","TOKEN"]
+        qr_type  = segments[1] if len(segments) > 1 else "start"
+        token    = segments[2] if len(segments) > 2 else ""
     else:
-        await message.answer(t("qr_not_selected", l))
+        # legacy /qr TOKEN — treat as start
+        qr_type = "start"
+        token   = token_raw
+
+    if not token:
+        await message.answer("❌ Неверный QR-код.")
+        return
+
+    # Rate limit — не больше 10 сканов в минуту
+    if not check_rate(tg_id, "qr_scan"):
+        await message.answer("⚠️ Слишком часто. Подожди немного.")
+        return
+
+    qr_row = get_qr_token_info(token)
+    if not qr_row:
+        await message.answer("❌ QR-код недействителен или устарел.")
+        return
+
+    event_id = qr_row["event_id"]
+    event    = get_event(event_id)
+    if not event:
+        await message.answer("❌ Ивент не найден.")
+        return
+
+    actual_type = qr_row.get("qr_type", "start")
+
+    if actual_type == "start":
+        result = confirm_attendance_start(event_id, tg_id)
+        if result == "ok":
+            await message.answer(
+                "✅ <b>Присутствие подтверждено!</b>\n\n"
+                + f"Ивент: <b>{event['title']}</b>\n"
+                + "Статус: 🔨 Работаю\n\n"
+                + "Когда закончишь — сканируй QR финиша.",
+                parse_mode="HTML"
+            )
+        elif result == "already":
+            await message.answer(t("qr_already", l))
+        else:
+            await message.answer(t("qr_not_selected", l))
+
+    elif actual_type == "end":
+        result = confirm_attendance_end(event_id, tg_id)
+        if result == "ok":
+            await message.answer(
+                "✅ <b>Работа завершена!</b>\n\n"
+                + f"Ивент: <b>{event['title']}</b>\n"
+                + "Статус: ✅ Завершил работу\n\n"
+                + "Карточка и оценка будут выданы организатором.",
+                parse_mode="HTML"
+            )
+        elif result == "already_done":
+            await message.answer("ℹ️ Ты уже завершил работу на этом ивенте.")
+        else:
+            await message.answer(
+                f"❌ Ты не можешь закрыть работу — "
+                f"сначала отметь приход через QR старта."
+            )
 
 
 # ─── Предложить ивент ────────────────────────────────────────────────────────

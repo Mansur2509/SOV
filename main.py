@@ -8,6 +8,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 
 from config import BOT_TOKEN
+from security import SecurityMiddleware
 from database import init_db
 from handlers import user, admin
 from handlers.organizer import router as organizer_router
@@ -32,6 +33,12 @@ WEB_PORT     = int(os.environ.get("PORT", 8080))
 async def on_startup(bot: Bot):
     init_db()
     logger.info("База данных инициализирована ✓")
+    try:
+        from database import run_migrations
+        run_migrations()
+        logger.info("Миграции выполнены ✓")
+    except Exception as e:
+        logger.warning(f"Миграции: {e}")
 
     try:
         init_audit_table()
@@ -74,6 +81,10 @@ async def keepalive_loop():
 async def main():
     bot = Bot(token=BOT_TOKEN)
     dp  = Dispatcher(storage=MemoryStorage())
+
+    # Защита: rate limiting, SQL-инъекции, DDoS
+    dp.message.middleware(SecurityMiddleware())
+    dp.callback_query.middleware(SecurityMiddleware())
 
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)

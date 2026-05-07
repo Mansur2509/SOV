@@ -15,24 +15,32 @@ from aiogram.types import InlineKeyboardButton
 from config import PAIRS_SCHEDULE
 from database import (
     get_all_users, get_user, update_user_notes, delete_user,
-    get_all_events, get_event, create_event, close_event, delete_event, set_event_photo,
+    get_all_events, get_event, create_event, close_event, delete_event,
+    set_event_photo, set_event_card_photo,
     get_applications, auto_select, get_selected_for_event,
+    get_selected_users_detail, set_application_status,
     manually_add_to_event, manually_remove_from_event,
     add_rating, get_top_users,
     add_points, get_point_history,
     ban_user, unban_user,
-    create_announcement, get_all_users,
-    get_proposals, update_proposal_status,
-    issue_card, generate_qr_token,
-    is_banned
+    create_announcement, get_announcements, get_announcements_count, delete_announcement,
+    get_proposals, update_proposal_status, get_proposal,
+    issue_card, issue_cards_bulk, generate_qr_token,
+    close_event_work, complete_event, get_event_work_status,
+    bulk_ban, bulk_unban, bulk_add_points, bulk_add_rating_score,
+    adjust_rating, get_users_page, get_channel_id,
+    is_banned, run_migrations,
 )
 from keyboards import (
     admin_menu_kb, admin_events_kb, admin_event_detail_kb,
     admin_users_kb, admin_user_detail_kb,
-    rate_select_user_kb, main_menu_kb,
-    confirm_ban_kb, confirm_delete_kb,
-    proposals_kb, proposal_action_kb
+    rate_select_user_kb, rate_multi_kb, edit_selected_kb,
+    give_card_events_kb, multi_select_users_kb,
+    main_menu_kb, confirm_ban_kb, confirm_delete_kb,
+    proposals_kb, proposal_action_kb,
+    announcements_nav_kb,
 )
+from utils.tg_helpers import safe_edit_text
 
 router = Router()
 
@@ -351,6 +359,13 @@ async def cev_strict(message: Message, state: FSMContext, bot: Bot):
         f"Загрузи фото ивента через кнопку «🖼 Загрузить фото» в списке ивентов.",
         parse_mode="HTML", reply_markup=admin_menu_kb()
     )
+    # Пост нового ивента в канал
+    new_event = get_event(eid)
+    if new_event:
+        try:
+            await post_event_to_channel(bot, new_event)
+        except Exception:
+            pass
 
     # ── Рассылка всем участникам о новом ивенте ──────────────────────────────
     await _broadcast_new_event(bot, data["title"], data["event_date"],
@@ -628,7 +643,22 @@ async def adm_autoselect(call: CallbackQuery, bot: Bot):
     if rejected:
         rej_lines = [f"— {'♂' if r['gender']=='М' else '♀'} {r['full_name']}" for r in rejected]
         await call.message.answer(f"❌ <b>Не прошли:</b>\n" + "\n".join(rej_lines), parse_mode="HTML")
+
+    # Пост в канал при создании набора
+    try:
+        await post_event_to_channel(bot, event)
+    except Exception:
+        pass
+
     await call.answer("✅ Готово!", show_alert=True)
+
+    # Спрашиваем хочет ли редактировать список
+    from keyboards import edit_selected_kb
+    await call.message.answer(
+        f"✅ Автоподбор завершён: выбрано <b>{len(selected)}</b> чел.\n\nХочешь изменить список вручную?",
+        parse_mode="HTML",
+        reply_markup=edit_selected_kb(event_id, selected)
+    )
 
     for s in selected:
         try:
@@ -698,6 +728,24 @@ async def issue_cards(call: CallbackQuery, bot: Bot):
             except Exception:
                 pass
     await call.answer(f"✅ Выдано карточек: {issued}", show_alert=True)
+    # Уведомляем с фото карточки если есть
+    card_photo = event.get("card_photo_file_id") or event.get("photo_file_id")
+    for vol in volunteers:
+        if issue_card(vol["tg_id"], event_id):
+            try:
+                caption = (
+                    f"🎴 <b>Тебе выдана карточка участника!</b>\n\n"
+                    f"Ивент: <b>«{event['title']}»</b> ({event['event_date']})\n"
+                    f"Смотри в «🎴 Мои карточки»."
+                )
+                if card_photo:
+                    await bot.send_photo(vol["tg_id"], card_photo, caption=caption, parse_mode="HTML")
+                else:
+                    await bot.send_message(vol["tg_id"], caption, parse_mode="HTML")
+                import asyncio as _asyncio
+                await _asyncio.sleep(0.05)
+            except Exception:
+                pass
 
 
 # ─── Участники ───────────────────────────────────────────────────────────────
@@ -705,11 +753,14 @@ async def issue_cards(call: CallbackQuery, bot: Bot):
 @router.message(F.text == "👥 Все участники")
 async def all_users_handler(message: Message):
     if not is_admin(message.from_user.id): return
-    users = get_all_users()
+    users, total = get_users_page(page=0, per_page=30)
     if not users:
         await message.answer("Участников нет."); return
-    await message.answer("👥 <b>Все участники</b>:", parse_mode="HTML",
-                         reply_markup=admin_users_kb(users))
+    await message.answer(
+        f"👥 <b>Все участники</b> ({total} чел.):",
+        parse_mode="HTML",
+        reply_markup=admin_users_kb(users, page=0, total=total)
+    )
 
 
 @router.callback_query(F.data.regexp(r"^adm_user_(\d+)$"))
@@ -1577,3 +1628,702 @@ async def back_proposals(call: CallbackQuery):
 async def close_proposals(call: CallbackQuery):
     await call.message.delete()
     await call.answer()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# НОВЫЕ ХЕНДЛЕРЫ v5.0
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ─── FSM ─────────────────────────────────────────────────────────────────────
+
+class CardPhotoState(StatesGroup):
+    photo = State()
+
+class RatingAdjustState(StatesGroup):
+    delta  = State()
+    reason = State()
+
+class MultiRateState(StatesGroup):
+    event_id = State()
+    score    = State()
+    comment  = State()
+
+# ─── Пагинация участников ─────────────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^users_page_(\d+)$"))
+async def users_page_handler(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    page = int(call.data.split("_")[2])
+    users, total = get_users_page(page=page, per_page=30)
+    if not users:
+        await call.answer("Нет участников.", show_alert=True); return
+    await safe_edit_text(
+        call.message, "👥 <b>Все участники</b>:", parse_mode="HTML",
+        reply_markup=admin_users_kb(users, page=page, total=total)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "noop")
+async def noop_cb(call: CallbackQuery):
+    await call.answer()
+
+
+# ─── Удаление объявлений ──────────────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^ann_delete_offset_(\d+)$"))
+async def ann_delete_by_offset(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    offset = int(call.data.split("_")[3])
+    anns   = get_announcements(limit=1, offset=offset)
+    if not anns:
+        await call.answer("Не найдено.", show_alert=True); return
+    ann_id = anns[0]["id"]
+    delete_announcement(ann_id)
+    await call.message.delete()
+    await call.answer("🗑 Объявление удалено.", show_alert=True)
+
+
+# ─── Фото карточки (отдельно) ─────────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^upload_card_(\d+)$"))
+async def upload_card_photo_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id): return
+    event_id = int(call.data.split("_")[2])
+    await state.update_data(card_event_id=event_id)
+    await state.set_state(CardPhotoState.photo)
+    await call.message.answer(
+        "🎴 Отправь фото которое будет на <b>карточке участника</b>:\n"
+        "<i>Это отдельное фото — не фото самого ивента.</i>",
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.message(CardPhotoState.photo, F.photo)
+async def upload_card_photo_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    set_event_card_photo(data["card_event_id"], message.photo[-1].file_id)
+    await state.clear()
+    await message.answer("✅ Фото карточки сохранено!", reply_markup=admin_menu_kb())
+
+
+# ─── Редактирование списка после автоподбора ──────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^edit_selected_(\d+)$"))
+async def edit_selected_start(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    event_id = int(call.data.split("_")[2])
+    selected = get_selected_users_detail(event_id)
+    if not selected:
+        await call.answer(
+            "Нет выбранных. Сначала запусти 🤖 Автоподбор.", show_alert=True
+        ); return
+    await safe_edit_text(
+        call.message,
+        f"✏️ <b>Редактирование списка</b> ({len(selected)} чел.)\n\n"
+        f"Нажми ❌ напротив участника чтобы убрать.\n"
+        f"Когда закончишь — нажми ✅ Подтвердить список.",
+        parse_mode="HTML",
+        reply_markup=edit_selected_kb(event_id, selected)
+    )
+
+
+@router.callback_query(F.data.regexp(r"^remove_selected_(\d+)_(\d+)$"))
+async def remove_from_selected(call: CallbackQuery, bot: Bot):
+    parts    = call.data.split("_")
+    event_id = int(parts[2])
+    tg_id    = int(parts[3])
+    manually_remove_from_event(event_id, tg_id)
+    user  = get_user(tg_id)
+    event = get_event(event_id)
+    await call.answer(f"❌ {user['full_name']} убран.", show_alert=True)
+    selected = get_selected_users_detail(event_id)
+    if selected:
+        await safe_edit_text(
+            call.message,
+            f"✏️ <b>Редактирование списка</b> ({len(selected)} чел.)",
+            parse_mode="HTML",
+            reply_markup=edit_selected_kb(event_id, selected)
+        )
+    else:
+        await safe_edit_text(call.message, "Список пуст. Запусти автоподбор заново.")
+    try:
+        await bot.send_message(
+            tg_id,
+            f"ℹ️ Тебя убрали из списка ивента «{event['title']}»."
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.regexp(r"^confirm_selected_(\d+)$"))
+async def confirm_selected(call: CallbackQuery, bot: Bot):
+    event_id = int(call.data.split("_")[2])
+    event    = get_event(event_id)
+    selected = get_selected_users_detail(event_id)
+    if not selected:
+        await call.answer("Список пуст.", show_alert=True); return
+
+    pair_str = get_pair_info(event.get("event_time", ""))
+    lines    = [f"{i}. {s['full_name']} {s['group_name']}" for i, s in enumerate(selected, 1)]
+    report   = (
+        f"📋 <b>Просьба отпросить волонтёров</b>\n"
+        f"«<b>{event['title']}</b>»\n"
+        f"📅 {event['event_date']} {event.get('event_time','')} {pair_str}\n\n"
+        + "\n".join(lines)
+    )
+    await call.message.answer(report, parse_mode="HTML")
+    await call.answer("✅ Список подтверждён!")
+
+    # Пост в канал
+    channel_id = get_channel_id()
+    if channel_id:
+        try:
+            await bot.send_message(
+                channel_id,
+                f"✅ <b>Набор завершён: «{event['title']}»</b>\n"
+                f"Выбрано {len(selected)} из {event['total_slots']} волонтёров.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+    # Уведомляем выбранных
+    for s in selected:
+        try:
+            msg = (
+                f"🎉 Ты подтверждён волонтёром на <b>«{event['title']}»</b>!\n"
+                f"📅 {event['event_date']}"
+                + (f" в {event['event_time']}" if event.get("event_time") else "")
+                + (f"\n📍 {event['location']}" if event.get("location") else "")
+            )
+            await bot.send_message(s["tg_id"], msg, parse_mode="HTML")
+        except Exception:
+            pass
+
+
+# ─── QR двух типов (старт/финиш) ─────────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^gen_qr_(start|end)_(\d+)$"))
+async def gen_qr_typed(call: CallbackQuery, bot: Bot):
+    parts    = call.data.split("_")
+    qr_type  = parts[2]
+    event_id = int(parts[3])
+    event    = get_event(event_id)
+    token    = generate_qr_token(event_id, qr_type)
+    bot_info = await bot.get_me()
+    qr_url   = f"https://t.me/{bot_info.username}?start=qr_{qr_type}_{token}"
+
+    img = qrcode.make(qr_url)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+
+    label = "📍 ПРИХОД НА ИВЕНТ" if qr_type == "start" else "🏁 КОНЕЦ РАБОТЫ"
+    desc  = "Волонтёры сканируют при приходе → статус: Работаю" if qr_type == "start" \
+        else "Волонтёры сканируют по окончании → статус: Завершил"
+
+    await call.message.answer_photo(
+        BufferedInputFile(buf.getvalue(), filename="qr.png"),
+        caption=(
+            f"🔲 <b>QR [{label}]</b>\n"
+            f"Ивент: «{event['title']}»\n\n"
+            f"{desc}\n\n"
+            f"<code>{qr_url}</code>"
+        ),
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+# ─── Закрытие работы / завершение ивента ─────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^close_work_(\d+)$"))
+async def close_work_handler(call: CallbackQuery, bot: Bot):
+    if not is_admin(call.from_user.id): return
+    event_id  = int(call.data.split("_")[2])
+    event     = get_event(event_id)
+    violators = close_event_work(event_id)
+
+    text = f"🏁 <b>Работа закрыта: «{event['title']}»</b>\n\n"
+    if violators:
+        text += f"⚠️ Автоматический поинт ({len(violators)} чел.):\n"
+        for v in violators:
+            text += f"  • {v['full_name']}\n"
+            try:
+                await bot.send_message(
+                    v["tg_id"],
+                    f"⚠️ Ты не завершил работу на ивенте «{event['title']}» — "
+                    f"начислен поинт нарушения."
+                )
+            except Exception:
+                pass
+    else:
+        text += "✅ Все завершили работу."
+
+    text += "\n\nТеперь выдай QR финиша или нажми ✅ Завершить ивент."
+    await call.message.answer(text, parse_mode="HTML")
+    await call.answer("🏁 Работа закрыта!", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^finish_event_(\d+)$"))
+async def finish_event_handler(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    event_id = int(call.data.split("_")[2])
+    event    = get_event(event_id)
+    complete_event(event_id)
+    status   = get_event_work_status(event_id)
+    lines    = "\n".join(f"  {k}: {v}" for k, v in status.items())
+    await call.message.answer(
+        f"✅ <b>Ивент «{event['title']}» полностью завершён!</b>\n\n"
+        f"Статусы участников:\n{lines}\n\n"
+        f"Теперь выдавай карточки и оценки через 📂 Все ивенты.",
+        parse_mode="HTML"
+    )
+    await call.answer("✅ Ивент завершён!")
+
+
+# ─── Уведомление в канал при создании ивента ─────────────────────────────────
+
+async def post_event_to_channel(bot: Bot, event: dict):
+    channel_id = get_channel_id()
+    if not channel_id:
+        return
+    male_str   = f"{event['male_slots']} парней"   if event.get("male_slots")   else ""
+    female_str = f"{event['female_slots']} девушек" if event.get("female_slots") else ""
+    gender_str = ", ".join(filter(None, [male_str, female_str])) or "без ограничений"
+    text = (
+        f"📌 <b>Новый ивент SOV!</b>\n\n"
+        f"<b>{event['title']}</b>\n\n"
+        f"👥 Нужно: <b>{event['total_slots']}</b> чел.\n"
+        f"🚻 {gender_str}\n"
+    )
+    if event.get("event_date"): text += f"📅 {event['event_date']}\n"
+    if event.get("event_time"): text += f"🕐 {event['event_time']}\n"
+    if event.get("location"):   text += f"📍 {event['location']}\n"
+    if event.get("duration"):   text += f"⏱ {event['duration']}\n"
+    if event.get("description"):text += f"\n{event['description']}\n"
+    bot_info = await bot.get_me()
+    text += f"\n✋ Записаться → @{bot_info.username}"
+    try:
+        if event.get("photo_file_id"):
+            await bot.send_photo(channel_id, event["photo_file_id"], caption=text, parse_mode="HTML")
+        else:
+            await bot.send_message(channel_id, text, parse_mode="HTML")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Channel post failed: {e}")
+
+
+async def notify_slots_update(bot: Bot, event_id: int):
+    """Уведомляет в канал когда осталась половина мест."""
+    channel_id = get_channel_id()
+    if not channel_id: return
+    event = get_event(event_id)
+    if not event: return
+    apps   = get_applications(event_id)
+    count  = len([a for a in apps if a["status"] in ("pending", "selected")])
+    total  = event["total_slots"]
+    half   = total // 2
+    free   = total - count
+    if free == half:
+        try:
+            await bot.send_message(
+                channel_id,
+                f"⚡ <b>«{event['title']}»</b> — осталось <b>{free}</b> из {total} мест!",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    elif free == 0:
+        try:
+            await bot.send_message(
+                channel_id,
+                f"🔒 <b>«{event['title']}»</b> — все места заняты! Регистрация закрыта.",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+
+# ─── Ручная корректировка рейтинга ───────────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^rating_(add|sub)_(\d+)$"))
+async def rating_adjust_start(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id): return
+    parts  = call.data.split("_")
+    action = parts[1]
+    tg_id  = int(parts[2])
+    await state.update_data(rating_tg_id=tg_id, rating_action=action)
+    await state.set_state(RatingAdjustState.delta)
+    user = get_user(tg_id)
+    sign = "прибавить" if action == "add" else "убрать"
+    await call.message.answer(
+        f"⭐ Сколько баллов {sign} у <b>{user['full_name']}</b>?\n"
+        f"Текущий рейтинг: <b>{user['rating']}</b>\n"
+        f"Введи число (например: 0.5 или 1):",
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.message(RatingAdjustState.delta)
+async def rating_adjust_delta(message: Message, state: FSMContext):
+    try:
+        delta = float(message.text.strip().replace(",", "."))
+        if delta <= 0 or delta > 10: raise ValueError
+    except ValueError:
+        await message.answer("⚠️ Введи положительное число до 10."); return
+    await state.update_data(rating_delta=delta)
+    await state.set_state(RatingAdjustState.reason)
+    await message.answer("💬 Причина (или «-»):")
+
+
+@router.message(RatingAdjustState.reason)
+async def rating_adjust_apply(message: Message, state: FSMContext, bot: Bot):
+    data   = await state.get_data()
+    tg_id  = data["rating_tg_id"]
+    delta  = data["rating_delta"]
+    action = data["rating_action"]
+    reason = "" if message.text.strip() == "-" else message.text.strip()
+    await state.clear()
+
+    actual = delta if action == "add" else -delta
+    adjust_rating(tg_id, actual, reason)
+    user = get_user(tg_id)
+    sign = f"+{delta}" if action == "add" else f"-{delta}"
+
+    await message.answer(
+        f"✅ Рейтинг <b>{user['full_name']}</b>: {sign} → <b>{user['rating']}</b>",
+        parse_mode="HTML", reply_markup=admin_menu_kb()
+    )
+    try:
+        icon = "📈" if action == "add" else "📉"
+        await bot.send_message(
+            tg_id,
+            f"{icon} Твой рейтинг изменён: {sign}\n"
+            f"Текущий рейтинг: <b>{user['rating']}</b>"
+            + (f"\nПричина: {reason}" if reason else ""),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+
+# ─── Выдать карточку конкретному участнику ────────────────────────────────────
+
+@router.callback_query(F.data.regexp(r"^give_card_(\d+)$"))
+async def give_card_to_user(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    tg_id  = int(call.data.split("_")[2])
+    events = get_all_events()[:15]
+    if not events:
+        await call.answer("Нет ивентов.", show_alert=True); return
+    await call.message.answer(
+        "🎴 Выбери ивент для выдачи карточки:",
+        reply_markup=give_card_events_kb(events, tg_id)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.regexp(r"^give_card_ev_(\d+)_(\d+)$"))
+async def give_card_ev_apply(call: CallbackQuery, bot: Bot):
+    parts    = call.data.split("_")
+    tg_id    = int(parts[3])
+    event_id = int(parts[4])
+    ok       = issue_card(tg_id, event_id)
+    event    = get_event(event_id)
+    user     = get_user(tg_id)
+    if ok:
+        await call.message.edit_text(
+            f"✅ Карточка выдана <b>{user['full_name']}</b> — «{event['title']}»",
+            parse_mode="HTML"
+        )
+        try:
+            # Берём фото карточки если есть
+            card_photo = event.get("card_photo_file_id") or event.get("photo_file_id")
+            caption = (
+                f"🎴 <b>Тебе выдана карточка участника!</b>\n\n"
+                f"Ивент: «{event['title']}» ({event['event_date']})\n"
+                f"Смотри в «🎴 Мои карточки»."
+            )
+            if card_photo:
+                await bot.send_photo(tg_id, card_photo, caption=caption, parse_mode="HTML")
+            else:
+                await bot.send_message(tg_id, caption, parse_mode="HTML")
+        except Exception:
+            pass
+    else:
+        await call.answer("Карточка уже выдана.", show_alert=True)
+
+
+# ─── Мульти-выбор участников ──────────────────────────────────────────────────
+
+_multi_state: dict = {}
+
+
+@router.callback_query(F.data == "multi_select_users")
+async def multi_select_start(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    b = InlineKeyboardBuilder()
+    actions = [
+        ("⏳ Бан 30д",       "ban_temp"),
+        ("🚫 Фулл бан",      "ban_full"),
+        ("✅ Разбанить",      "unban"),
+        ("⚠️ +1 поинт",      "pts_add"),
+        ("✅ -1 поинт",      "pts_sub"),
+        ("🎴 Выдать карточки","cards"),
+        ("⭐ Одна оценка",   "rate"),
+    ]
+    for label, cb in actions:
+        b.row(InlineKeyboardButton(text=label, callback_data=f"ms_action_{cb}"))
+    b.row(InlineKeyboardButton(text="❌ Отмена", callback_data="ms_cancel"))
+    await call.message.answer("☑️ Что сделать с несколькими участниками?",
+                               reply_markup=b.as_markup())
+    await call.answer()
+
+
+@router.callback_query(F.data.regexp(r"^ms_action_(\w+)$"))
+async def ms_action_select(call: CallbackQuery):
+    action = call.data[10:]  # убираем "ms_action_"
+    tg_id  = call.from_user.id
+    users, total = get_users_page(page=0, per_page=30)
+    _multi_state[tg_id] = {"action": action, "selected": set(), "page": 0, "total": total}
+    await call.message.edit_text(
+        f"☑️ Выбери участников (нажимай чтобы отмечать):\n"
+        f"Страница 1 / {max(1,(total+29)//30)}",
+        reply_markup=multi_select_users_kb(users, set(), action)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.regexp(r"^ms_toggle_(\w+)_(\d+)$"))
+async def ms_toggle(call: CallbackQuery):
+    parts    = call.data.split("_")
+    action   = parts[2]
+    user_id  = int(parts[3])
+    admin_id = call.from_user.id
+    st       = _multi_state.setdefault(admin_id, {"action": action, "selected": set(), "page": 0})
+    if user_id in st["selected"]:
+        st["selected"].discard(user_id)
+    else:
+        st["selected"].add(user_id)
+    users, total = get_users_page(page=st.get("page", 0), per_page=30)
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=multi_select_users_kb(users, st["selected"], action)
+        )
+    except Exception:
+        pass
+    await call.answer(f"{'✅' if user_id in st['selected'] else '❌'} {len(st['selected'])} выбрано")
+
+
+@router.callback_query(F.data.regexp(r"^ms_apply_(\w+)$"))
+async def ms_apply(call: CallbackQuery, bot: Bot, state: FSMContext):
+    action   = call.data[9:]   # убираем "ms_apply_"
+    admin_id = call.from_user.id
+    ms       = _multi_state.pop(admin_id, {})
+    ids      = list(ms.get("selected", set()))
+    if not ids:
+        await call.answer("Никого не выбрано.", show_alert=True); return
+
+    users_info = [u for u in [get_user(i) for i in ids] if u]
+    names      = ", ".join(u["full_name"] for u in users_info[:5])
+    if len(users_info) > 5:
+        names += f" и ещё {len(users_info)-5}"
+
+    if action == "ban_temp":
+        bulk_ban(ids, "temp")
+        await call.message.edit_text(f"⏳ Бан 30д — {len(ids)} чел.: {names}")
+        for uid in ids:
+            try: await bot.send_message(uid, "⏳ Тебе выдан временный бан на 30 дней в SOV.")
+            except Exception: pass
+
+    elif action == "ban_full":
+        bulk_ban(ids, "full")
+        await call.message.edit_text(f"🚫 Фулл бан — {len(ids)} чел.: {names}")
+        for uid in ids:
+            try: await bot.send_message(uid, "🚫 Тебе выдан постоянный бан в SOV.")
+            except Exception: pass
+
+    elif action == "unban":
+        bulk_unban(ids)
+        await call.message.edit_text(f"✅ Разбанены — {len(ids)} чел.: {names}")
+        for uid in ids:
+            try: await bot.send_message(uid, "✅ Твой бан снят. Добро пожаловать обратно!")
+            except Exception: pass
+
+    elif action == "pts_add":
+        bulk_add_points(ids, 1, "Массовое начисление")
+        await call.message.edit_text(f"⚠️ +1 поинт — {len(ids)} чел.: {names}")
+
+    elif action == "pts_sub":
+        bulk_add_points(ids, -1, "Массовое снятие")
+        await call.message.edit_text(f"✅ -1 поинт — {len(ids)} чел.: {names}")
+
+    elif action == "cards":
+        events = get_all_events()[:10]
+        b = InlineKeyboardBuilder()
+        ids_str = "_".join(str(i) for i in ids)
+        for ev in events:
+            b.row(InlineKeyboardButton(
+                text=f"📌 {ev['title']}",
+                callback_data=f"ms_cards_ev_{ev['id']}_{ids_str}"[:64]
+            ))
+        b.row(InlineKeyboardButton(text="❌ Отмена", callback_data="ms_cancel"))
+        await call.message.edit_text(
+            "Выбери ивент для выдачи карточек:",
+            reply_markup=b.as_markup()
+        )
+        await call.answer(); return
+
+    elif action == "rate":
+        await state.update_data(ms_rate_ids=ids)
+        await state.set_state(MultiRateState.score)
+        await call.message.edit_text(
+            f"⭐ Введи оценку (1-10) для {len(ids)} участников:"
+        )
+        await call.answer(); return
+
+    await call.answer("✅ Готово!", show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r"^ms_cards_ev_(\d+)_(.+)$"))
+async def ms_cards_ev(call: CallbackQuery, bot: Bot):
+    parts    = call.data.split("_")
+    event_id = int(parts[3])
+    raw_ids  = parts[4] if len(parts) > 4 else ""
+    ids      = [int(x) for x in raw_ids.split("_") if x.isdigit()]
+    count    = issue_cards_bulk(ids, event_id)
+    event    = get_event(event_id)
+    card_photo = event.get("card_photo_file_id") or event.get("photo_file_id")
+    await call.message.edit_text(
+        f"🎴 Карточки выданы <b>{count}</b> участникам — «{event['title']}»",
+        parse_mode="HTML"
+    )
+    for uid in ids:
+        try:
+            caption = (
+                f"🎴 Тебе выдана карточка участника!\n"
+                f"Ивент: «{event['title']}» ({event['event_date']})\n"
+                f"Смотри в «🎴 Мои карточки»."
+            )
+            if card_photo:
+                await bot.send_photo(uid, card_photo, caption=caption, parse_mode="HTML")
+            else:
+                await bot.send_message(uid, caption, parse_mode="HTML")
+        except Exception:
+            pass
+    await call.answer()
+
+
+@router.callback_query(F.data == "ms_cancel")
+async def ms_cancel(call: CallbackQuery):
+    _multi_state.pop(call.from_user.id, None)
+    await call.message.delete()
+    await call.answer("Отменено.")
+
+
+# ─── Мульти-оценка ────────────────────────────────────────────────────────────
+
+_rate_multi_sel: dict = {}
+
+
+@router.callback_query(F.data.regexp(r"^rate_multi_(\d+)$"))
+async def rate_multi_start(call: CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    event_id = int(call.data.split("_")[2])
+    apps     = get_applications(event_id)
+    _rate_multi_sel[call.from_user.id] = set()
+    await safe_edit_text(
+        call.message,
+        "☑️ Выбери участников для оценки:",
+        reply_markup=rate_multi_kb(event_id, apps, set())
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.regexp(r"^rate_multi_toggle_(\d+)_(\d+)$"))
+async def rate_multi_toggle(call: CallbackQuery):
+    parts    = call.data.split("_")
+    event_id = int(parts[3])
+    tg_id    = int(parts[4])
+    sel      = _rate_multi_sel.setdefault(call.from_user.id, set())
+    if tg_id in sel: sel.discard(tg_id)
+    else:            sel.add(tg_id)
+    apps = get_applications(event_id)
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=rate_multi_kb(event_id, apps, sel)
+        )
+    except Exception:
+        pass
+    await call.answer(f"{len(sel)} выбрано")
+
+
+@router.callback_query(F.data.regexp(r"^rate_multi_apply_(\d+)$"))
+async def rate_multi_apply(call: CallbackQuery, state: FSMContext):
+    event_id = int(call.data.split("_")[3])
+    ids      = list(_rate_multi_sel.pop(call.from_user.id, set()))
+    if not ids:
+        await call.answer("Никого не выбрано.", show_alert=True); return
+    await state.update_data(ms_rate_ids=ids, ms_rate_event_id=event_id)
+    await state.set_state(MultiRateState.score)
+    await call.message.edit_text(f"⭐ Введи оценку (1-10) для {len(ids)} участников:")
+    await call.answer()
+
+
+@router.message(MultiRateState.score)
+async def ms_rate_score(message: Message, state: FSMContext):
+    try:
+        score = float(message.text.strip().replace(",", "."))
+        if not 1.0 <= score <= 10.0: raise ValueError
+    except ValueError:
+        await message.answer("⚠️ Введи число от 1 до 10."); return
+    await state.update_data(ms_score=round(score, 1))
+    await state.set_state(MultiRateState.comment)
+    await message.answer("💬 Комментарий (или «-»):")
+
+
+@router.message(MultiRateState.comment)
+async def ms_rate_comment(message: Message, state: FSMContext, bot: Bot):
+    data     = await state.get_data()
+    ids      = data.get("ms_rate_ids", [])
+    score    = data["ms_score"]
+    event_id = data.get("ms_rate_event_id")
+    comment  = "" if message.text.strip() == "-" else message.text.strip()
+    await state.clear()
+
+    if not event_id:
+        # Просим выбрать ивент
+        events = get_all_events()[:10]
+        b = InlineKeyboardBuilder()
+        ids_str = "_".join(str(i) for i in ids)
+        for ev in events:
+            b.row(InlineKeyboardButton(
+                text=f"📌 {ev['title']}",
+                callback_data=f"ms_rate_final_{ev['id']}_{score}_{ids_str}"[:64]
+            ))
+        await message.answer("Выбери ивент для оценки:", reply_markup=b.as_markup())
+        return
+
+    event = get_event(event_id)
+    bulk_add_rating_score(ids, event_id, score, comment)
+    await message.answer(
+        f"✅ Оценка <b>{score}</b> выставлена <b>{len(ids)}</b> участникам — «{event['title']}»",
+        parse_mode="HTML", reply_markup=admin_menu_kb()
+    )
+    for uid in ids:
+        u = get_user(uid)
+        if not u: continue
+        try:
+            await bot.send_message(
+                uid,
+                f"📊 Оценка за «{event['title']}»: ⭐ {score}/10"
+                + (f"\n💬 {comment}" if comment else "")
+                + f"\n📈 Твой рейтинг: <b>{u['rating']}</b>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
